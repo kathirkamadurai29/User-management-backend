@@ -1,7 +1,10 @@
 const admin = require('firebase-admin');
 const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
 
 let isFirebaseInitialized = false;
+let storageBucket = null;
 
 function initializeFirebase() {
   const serviceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
@@ -10,115 +13,100 @@ function initializeFirebase() {
   const privateKey = process.env.FIREBASE_PRIVATE_KEY
     ? process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n')
     : undefined;
+  const bucketName = process.env.FIREBASE_STORAGE_BUCKET || (projectId ? `${projectId}.firebasestorage.app` : 'user-management-3ea6d.firebasestorage.app');
 
   try {
-    if (serviceAccountPath && fs.existsSync(serviceAccountPath)) {
-      const serviceAccount = JSON.parse(fs.readFileSync(serviceAccountPath, 'utf8'));
-      admin.initializeApp({
-        credential: admin.credential.cert(serviceAccount),
-      });
+    const possiblePaths = [
+      serviceAccountPath,
+      serviceAccountPath ? path.resolve(__dirname, '..', serviceAccountPath) : null,
+      path.resolve(__dirname, '..', 'serviceAccountKey.json'),
+      path.resolve(__dirname, '..', 'ServiceAccountKey.json'),
+      path.resolve(__dirname, '..', 'ServiceAccountKey.json.json'),
+    ].filter(Boolean);
+
+    const foundPath = possiblePaths.find((p) => fs.existsSync(p));
+
+    if (foundPath) {
+      const serviceAccount = JSON.parse(fs.readFileSync(foundPath, 'utf8'));
+      if (!admin.apps.length) {
+        admin.initializeApp({
+          credential: admin.credential.cert(serviceAccount),
+          storageBucket: bucketName,
+        });
+      }
       isFirebaseInitialized = true;
-      console.log('[Firebase Admin] Initialized with service account file');
+      storageBucket = admin.storage().bucket();
+      console.log(`[Firebase Admin] Storage initialized via key: ${path.basename(foundPath)} (bucket: ${bucketName})`);
     } else if (projectId && clientEmail && privateKey) {
-      admin.initializeApp({
-        credential: admin.credential.cert({
-          projectId,
-          clientEmail,
-          privateKey,
-        }),
-      });
+      if (!admin.apps.length) {
+        admin.initializeApp({
+          credential: admin.credential.cert({
+            projectId,
+            clientEmail,
+            privateKey,
+          }),
+          storageBucket: bucketName,
+        });
+      }
       isFirebaseInitialized = true;
-      console.log('[Firebase Admin] Initialized with environment credentials');
+      storageBucket = admin.storage().bucket();
+      console.log(`[Firebase Admin] Storage initialized via environment credentials (bucket: ${bucketName})`);
     } else {
-      console.log('[Firebase Admin] Credentials not configured. Operating in simulated notification/event mode.');
+      console.log('[Firebase Admin] Storage credentials not configured. Operating in simulated resilient mode.');
     }
   } catch (err) {
-    console.warn('[Firebase Admin] Initialization error:', err.message);
+    console.warn('[Firebase Admin] Storage initialization notice:', err.message);
   }
 }
 
 /**
- * Triggers notification / event on user creation
+ * Uploads a user profile picture to Firebase Storage and returns its public/media URL.
+ * Falls back gracefully to base64 data URI if storage bucket is offline or unconfigured.
  */
-async function triggerUserCreatedEvent(user) {
-  const eventPayload = {
-    eventType: 'USER_CREATED',
-    timestamp: new Date().toISOString(),
-    clientId: user.client_id,
-    userId: user._id ? user._id.toString() : user.id,
-    email: user.email,
-    name: user.name,
-    role: user.role,
-  };
+async function uploadProfilePicture(fileBuffer, filename = 'avatar.jpg', contentType = 'image/jpeg', clientId = 'default') {
+  if (!fileBuffer || !fileBuffer.length) {
+    return '';
+  }
 
-  console.log('[Firebase Admin Event] Triggered USER_CREATED:', eventPayload);
+  const cleanClient = String(clientId).replace(/[^a-zA-Z0-9_]/g, '_');
+  const safeName = path.basename(filename) || 'avatar.jpg';
+  const uniqueBlobPath = `avatars/${cleanClient}/${crypto.randomBytes(8).toString('hex')}_${safeName}`;
 
-  if (isFirebaseInitialized) {
+  if (isFirebaseInitialized && storageBucket) {
     try {
-      // Send notification message to tenant topic
-      const topic = `tenant_${user.client_id.replace(/[^a-zA-Z0-9-_.~%]/g, '_')}`;
-      await admin.messaging().send({
-        topic,
-        notification: {
-          title: 'New User Registered',
-          body: `User ${user.name} (${user.email}) was added.`,
-        },
-        data: {
-          eventType: 'USER_CREATED',
-          userId: eventPayload.userId,
-        },
+      const file = storageBucket.file(uniqueBlobPath);
+      await file.save(fileBuffer, {
+        metadata: { contentType },
+        resumable: false,
       });
-      console.log(`[Firebase Admin] Notification broadcast to topic: ${topic}`);
-    } catch (err) {
-      console.warn('[Firebase Admin] Failed to broadcast FCM message:', err.message);
+
+      // Attempt to make public
+      try {
+        await file.makePublic();
+        const publicUrl = `https://storage.googleapis.com/${storageBucket.name}/${uniqueBlobPath}`;
+        console.log(`[Firebase Storage] Uploaded public avatar: ${publicUrl}`);
+        return publicUrl;
+      } catch (aclErr) {
+        console.log(`[Firebase Storage] makePublic notice (${aclErr.message}), returning direct media URL.`);
+      }
+
+      const encodedPath = encodeURIComponent(uniqueBlobPath);
+      const mediaUrl = `https://firebasestorage.googleapis.com/v0/b/${storageBucket.name}/o/${encodedPath}?alt=media`;
+      console.log(`[Firebase Storage] Uploaded media URL: ${mediaUrl}`);
+      return mediaUrl;
+    } catch (uploadErr) {
+      console.warn(`[Firebase Storage] Upload notice (${uploadErr.message}), using fallback.`);
     }
   }
 
-  return eventPayload;
-}
-
-/**
- * Triggers notification / event on user deletion
- */
-async function triggerUserDeletedEvent(user) {
-  const eventPayload = {
-    eventType: 'USER_DELETED',
-    timestamp: new Date().toISOString(),
-    clientId: user.client_id,
-    userId: user._id ? user._id.toString() : user.id,
-    email: user.email,
-    name: user.name,
-  };
-
-  console.log('[Firebase Admin Event] Triggered USER_DELETED:', eventPayload);
-
-  if (isFirebaseInitialized) {
-    try {
-      const topic = `tenant_${user.client_id.replace(/[^a-zA-Z0-9-_.~%]/g, '_')}`;
-      await admin.messaging().send({
-        topic,
-        notification: {
-          title: 'User Deactivated',
-          body: `User ${user.name} (${user.email}) was deactivated.`,
-        },
-        data: {
-          eventType: 'USER_DELETED',
-          userId: eventPayload.userId,
-        },
-      });
-      console.log(`[Firebase Admin] Deletion notification broadcast to topic: ${topic}`);
-    } catch (err) {
-      console.warn('[Firebase Admin] Failed to broadcast FCM message:', err.message);
-    }
-  }
-
-  return eventPayload;
+  // Resilient fallback: base64 data URI
+  const b64 = fileBuffer.toString('base64');
+  return `data:${contentType};base64,${b64}`;
 }
 
 module.exports = {
   initializeFirebase,
-  triggerUserCreatedEvent,
-  triggerUserDeletedEvent,
+  uploadProfilePicture,
   admin,
   get isInitialized() {
     return isFirebaseInitialized;

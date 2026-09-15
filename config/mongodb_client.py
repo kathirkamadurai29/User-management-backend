@@ -53,17 +53,25 @@ def _match_item(item: Dict[str, Any], query: Dict[str, Any]) -> bool:
                 return False
             continue
 
+        if isinstance(val, dict):
+            if "$in" in val and isinstance(val["$in"], (list, tuple, set)):
+                item_val = item.get(key)
+                allowed_str = {str(x) for x in val["$in"]}
+                if str(item_val) not in allowed_str and item_val not in val["$in"]:
+                    return False
+                continue
+
+            if "$regex" in val:
+                pattern = val["$regex"]
+                flags = re.IGNORECASE if "i" in val.get("$options", "") else 0
+                if not re.search(pattern, str(item.get(key, "")), flags):
+                    return False
+                continue
+
         if key == "_id":
             target_id = str(val)
             item_id = str(item.get("_id", ""))
             if item_id != target_id:
-                return False
-            continue
-
-        if isinstance(val, dict) and "$regex" in val:
-            pattern = val["$regex"]
-            flags = re.IGNORECASE if "i" in val.get("$options", "") else 0
-            if not re.search(pattern, str(item.get(key, "")), flags):
                 return False
             continue
 
@@ -175,6 +183,43 @@ class FallbackCollection:
             matched_count = 1
             modified_count = 1
         return Updated()
+
+    def update_many(self, query: Dict[str, Any], update: Dict[str, Any]):
+        data, items = self._get_items()
+        matched_count = 0
+        modified_count = 0
+        for item in items:
+            if _match_item(item, query):
+                matched_count += 1
+                if "$set" in update:
+                    item.update(update["$set"])
+                    item["updated_at"] = datetime.now(timezone.utc).isoformat()
+                    modified_count += 1
+        _save_fallback(data)
+        class UpdatedMany:
+            pass
+        res = UpdatedMany()
+        res.matched_count = matched_count
+        res.modified_count = modified_count
+        return res
+
+    def delete_one(self, query: Dict[str, Any]):
+        data, items = self._get_items()
+        idx = -1
+        for i, item in enumerate(items):
+            if _match_item(item, query):
+                idx = i
+                break
+        deleted_count = 0
+        if idx != -1:
+            items.pop(idx)
+            deleted_count = 1
+            _save_fallback(data)
+        class Deleted:
+            pass
+        res = Deleted()
+        res.deleted_count = deleted_count
+        return res
 
     def count_documents(self, query: Dict[str, Any] = None) -> int:
         if query is None:

@@ -8,25 +8,26 @@ const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 let supabase = null;
 let isConfigured = false;
 
-// Local fallback store for offline development / evaluation
-const LOCAL_STORE_PATH = path.join(__dirname, '..', '.clients_fallback.json');
+// Local fallback stores for offline / development resilience
+const CLIENTS_FALLBACK_FILE = path.join(__dirname, '..', '.clients_fallback.json');
+const ADMINS_FALLBACK_FILE = path.join(__dirname, '..', '.admins_fallback.json');
 
-function readLocalClients() {
+function readLocal(file) {
   try {
-    if (fs.existsSync(LOCAL_STORE_PATH)) {
-      return JSON.parse(fs.readFileSync(LOCAL_STORE_PATH, 'utf8'));
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, 'utf8'));
     }
   } catch (err) {
-    console.error('[Clients Store] Error reading local clients:', err.message);
+    console.error(`[Supabase Fallback] Error reading ${file}:`, err.message);
   }
   return [];
 }
 
-function writeLocalClients(clients) {
+function writeLocal(file, data) {
   try {
-    fs.writeFileSync(LOCAL_STORE_PATH, JSON.stringify(clients, null, 2), 'utf8');
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), 'utf8');
   } catch (err) {
-    console.error('[Clients Store] Error saving local clients:', err.message);
+    console.error(`[Supabase Fallback] Error writing ${file}:`, err.message);
   }
 }
 
@@ -47,75 +48,272 @@ if (supabaseUrl && supabaseKey && supabaseUrl.startsWith('http')) {
   console.log('[Supabase] SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY not configured. Operating in local resilient store mode.');
 }
 
-/**
- * Inserts a new client into the `clients` table
- */
-async function insertClient({ client_id, client_secret_hash, name, email }) {
-  const newClient = {
-    client_id,
-    client_secret_hash,
-    name,
+// -------------------------------------------------------------
+// CLIENTS (TENANTS)
+// -------------------------------------------------------------
+
+async function getClientByUsername(username) {
+  if (!username) return null;
+  const clean = username.trim().toLowerCase();
+
+  if (isConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*')
+      .ilike('username', clean)
+      .maybeSingle();
+
+    if (!error && data) return data;
+  }
+
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  return clients.find((c) => (c.username || '').toLowerCase() === clean) || null;
+}
+
+async function getClientByClientId(clientId) {
+  if (!clientId) return null;
+  const clean = clientId.trim();
+
+  if (isConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('clients')
+      .select('*')
+      .eq('client_id', clean)
+      .maybeSingle();
+
+    if (!error && data) return data;
+  }
+
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  return clients.find((c) => c.client_id === clean) || null;
+}
+
+async function getClientByIdentifier(identifier) {
+  if (!identifier) return null;
+  const clean = identifier.trim();
+
+  if (isConfigured && supabase) {
+    // Try username
+    const byUser = await supabase.from('clients').select('*').ilike('username', clean).maybeSingle();
+    if (byUser.data) return byUser.data;
+
+    // Try client_id
+    const byCli = await supabase.from('clients').select('*').eq('client_id', clean).maybeSingle();
+    if (byCli.data) return byCli.data;
+
+    // Try UUID id
+    if (clean.length === 36 && clean.includes('-')) {
+      const byId = await supabase.from('clients').select('*').eq('id', clean).maybeSingle();
+      if (byId.data) return byId.data;
+    }
+  }
+
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  return clients.find(
+    (c) =>
+      (c.username || '').toLowerCase() === clean.toLowerCase() ||
+      c.client_id === clean ||
+      String(c.id) === clean
+  ) || null;
+}
+
+async function insertClientAccount({ username, password_hash, name, email }) {
+  const cleanUser = username.trim().toLowerCase();
+  const newAccount = {
+    id: require('crypto').randomUUID(),
+    username: cleanUser,
+    password_hash,
+    name: name || cleanUser,
     email: email || null,
-    created_at: new Date().toISOString(),
+    client_id: null,
+    client_secret_hash: null,
     is_active: true,
+    created_at: new Date().toISOString(),
   };
 
   if (isConfigured && supabase) {
     const { data, error } = await supabase
       .from('clients')
-      .insert([newClient])
-      .select('client_id, name, email, created_at, is_active')
+      .insert([newAccount])
+      .select('id, username, name, email, is_active, created_at')
       .single();
 
     if (error) {
-      console.warn('[Supabase] insert error, falling back to local store:', error.message);
+      console.warn('[Supabase] Insert error, fallback to local store:', error.message);
     } else {
       return data;
     }
   }
 
-  // Resilient fallback
-  const clients = readLocalClients();
-  const existing = clients.find((c) => c.client_id === client_id);
-  if (existing) {
-    throw new Error(`Client ${client_id} already exists`);
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  if (clients.some((c) => (c.username || '').toLowerCase() === cleanUser)) {
+    throw new Error(`Client with username '${cleanUser}' already exists.`);
   }
-  clients.push(newClient);
-  writeLocalClients(clients);
-
-  return {
-    client_id: newClient.client_id,
-    name: newClient.name,
-    email: newClient.email,
-    created_at: newClient.created_at,
-    is_active: newClient.is_active,
-  };
+  clients.push(newAccount);
+  writeLocal(CLIENTS_FALLBACK_FILE, clients);
+  return newAccount;
 }
 
-/**
- * Retrieves a client by client_id including secret hash for authentication
- */
-async function getClientByClientId(client_id) {
+async function generateAndStoreClientCredentials(identifier, clientId, clientSecretHash) {
+  if (isConfigured && supabase) {
+    const client = await getClientByIdentifier(identifier);
+    if (!client) throw new Error(`Client '${identifier}' not found`);
+
+    const { data, error } = await supabase
+      .from('clients')
+      .update({
+        client_id: clientId,
+        client_secret_hash: clientSecretHash,
+      })
+      .eq('id', client.id)
+      .select()
+      .single();
+
+    if (!error && data) return data;
+  }
+
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  const idx = clients.findIndex(
+    (c) =>
+      (c.username || '').toLowerCase() === identifier.toLowerCase() ||
+      c.client_id === identifier ||
+      String(c.id) === identifier
+  );
+  if (idx === -1) throw new Error(`Client '${identifier}' not found`);
+
+  clients[idx].client_id = clientId;
+  clients[idx].client_secret_hash = clientSecretHash;
+  writeLocal(CLIENTS_FALLBACK_FILE, clients);
+  return clients[idx];
+}
+
+async function listAllClients() {
   if (isConfigured && supabase) {
     const { data, error } = await supabase
       .from('clients')
-      .select('*')
-      .eq('client_id', client_id)
-      .maybeSingle();
+      .select('id, username, name, email, client_id, is_active, created_at')
+      .order('created_at', { ascending: false });
 
-    if (!error && data) {
-      return data;
-    }
+    if (!error && data) return data;
   }
 
-  // Resilient fallback
-  const clients = readLocalClients();
-  return clients.find((c) => c.client_id === client_id) || null;
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  return clients.map((c) => ({
+    id: c.id,
+    username: c.username,
+    name: c.name,
+    email: c.email,
+    client_id: c.client_id,
+    is_active: c.is_active !== false,
+    created_at: c.created_at,
+    has_api_credentials: Boolean(c.client_id && c.client_secret_hash),
+  }));
+}
+
+async function updateClientStatus(identifier, isActive) {
+  const client = await getClientByIdentifier(identifier);
+  if (!client) return null;
+
+  if (isConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('clients')
+      .update({ is_active: isActive })
+      .eq('id', client.id)
+      .select()
+      .single();
+
+    if (!error && data) return data;
+  }
+
+  const clients = readLocal(CLIENTS_FALLBACK_FILE);
+  const idx = clients.findIndex((c) => String(c.id) === String(client.id));
+  if (idx !== -1) {
+    clients[idx].is_active = isActive;
+    writeLocal(CLIENTS_FALLBACK_FILE, clients);
+    return clients[idx];
+  }
+  return null;
+}
+
+async function deleteClientAccount(identifier) {
+  const client = await getClientByIdentifier(identifier);
+  if (!client) return false;
+
+  if (isConfigured && supabase) {
+    await supabase.from('clients').delete().eq('id', client.id);
+    return true;
+  }
+
+  let clients = readLocal(CLIENTS_FALLBACK_FILE);
+  clients = clients.filter((c) => String(c.id) !== String(client.id));
+  writeLocal(CLIENTS_FALLBACK_FILE, clients);
+  return true;
+}
+
+// -------------------------------------------------------------
+// ADMINS (SUPER ADMINS)
+// -------------------------------------------------------------
+
+async function getAdminByUsername(username) {
+  if (!username) return null;
+  const clean = username.trim().toLowerCase();
+
+  if (isConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('admins')
+      .select('*')
+      .ilike('username', clean)
+      .maybeSingle();
+
+    if (!error && data) return data;
+  }
+
+  const admins = readLocal(ADMINS_FALLBACK_FILE);
+  return admins.find((a) => (a.username || '').toLowerCase() === clean) || null;
+}
+
+async function insertAdmin({ username, password_hash, role = 'super_admin' }) {
+  const cleanUser = username.trim().toLowerCase();
+  const newAdmin = {
+    id: require('crypto').randomUUID(),
+    username: cleanUser,
+    password_hash,
+    role,
+    created_at: new Date().toISOString(),
+  };
+
+  if (isConfigured && supabase) {
+    const { data, error } = await supabase
+      .from('admins')
+      .insert([newAdmin])
+      .select('id, username, role, created_at')
+      .single();
+
+    if (!error && data) return data;
+  }
+
+  const admins = readLocal(ADMINS_FALLBACK_FILE);
+  const existingIdx = admins.findIndex((a) => (a.username || '').toLowerCase() === cleanUser);
+  if (existingIdx !== -1) {
+    admins[existingIdx] = newAdmin;
+  } else {
+    admins.push(newAdmin);
+  }
+  writeLocal(ADMINS_FALLBACK_FILE, admins);
+  return newAdmin;
 }
 
 module.exports = {
   supabase,
   isConfigured,
-  insertClient,
+  getClientByUsername,
   getClientByClientId,
+  getClientByIdentifier,
+  insertClientAccount,
+  generateAndStoreClientCredentials,
+  listAllClients,
+  updateClientStatus,
+  deleteClientAccount,
+  getAdminByUsername,
+  insertAdmin,
 };
