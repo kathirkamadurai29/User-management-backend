@@ -49,9 +49,11 @@ try:
     elif project_id and client_email and private_key:
         clean_key = private_key.replace("\\n", "\n")
         cred = credentials.Certificate({
+            "type": "service_account",
             "project_id": project_id,
-            "client_email": client_email,
             "private_key": clean_key,
+            "client_email": client_email,
+            "token_uri": "https://oauth2.googleapis.com/token",
         })
         if not firebase_admin._apps:
             firebase_admin.initialize_app(cred, {"storageBucket": storage_bucket_name})
