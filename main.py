@@ -67,7 +67,19 @@ app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_exception_handler(HTTPException, http_exception_handler)
 app.add_exception_handler(Exception, global_exception_handler)
 
-# Healthcheck
+# Root & Healthcheck
+@app.api_route("/", methods=["GET", "HEAD"], tags=["System"])
+async def root():
+    return {
+        "name": "Multi-Tenant User Management Platform API",
+        "status": "online",
+        "docs": "/api-docs",
+        "openapi": "/api/v1/openapi.json",
+        "health": "/health",
+        "version": "2.0.0",
+    }
+
+
 @app.get("/health", tags=["System"])
 async def health_check():
     return {
