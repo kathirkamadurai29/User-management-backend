@@ -67,6 +67,15 @@ def _clean_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
     return clean
 
 
+def _get_tenant_keys(tenant: Dict[str, Any]) -> List[str]:
+    keys = list(tenant.get("all_keys") or [])
+    if tenant.get("client_id") and tenant["client_id"] not in keys:
+        keys.append(tenant["client_id"])
+    if tenant.get("username") and tenant["username"] not in keys:
+        keys.append(tenant["username"])
+    return keys or ["default"]
+
+
 def _process_avatar_base64(avatar_base64: str, client_id: str, identifier: str) -> Optional[str]:
     """Helper to decode base64 image data and upload to Firebase Storage."""
     if not avatar_base64 or not avatar_base64.strip():
@@ -137,9 +146,9 @@ async def create_user(
     db = get_db()
     users_col = db["users"]
 
-    # Check for duplicate email in this tenant
+    tenant_keys = _get_tenant_keys(tenant)
     existing = users_col.find_one({
-        "client_id": client_id,
+        "client_id": {"$in": tenant_keys},
         "email": str(body.email).lower(),
         "is_deleted": False,
     })
@@ -201,13 +210,10 @@ async def list_users(
     db = get_db()
     users_col = db["users"]
 
-    # Match tenant via client_id, username, or sub for resilience
-    tenant_keys = [client_id]
-    if tenant.get("username") and tenant["username"] not in tenant_keys:
-        tenant_keys.append(tenant["username"])
-
+    # Match tenant via all resolved tenant keys for hard isolation
+    tenant_keys = _get_tenant_keys(tenant)
     query: Dict[str, Any] = {
-        "client_id": {"$in": tenant_keys} if len(tenant_keys) > 1 else client_id,
+        "client_id": {"$in": tenant_keys},
         "is_deleted": False,
     }
 
@@ -245,18 +251,14 @@ async def get_user(
     db = get_db()
     users_col = db["users"]
 
-    tenant_keys = [client_id]
-    if tenant.get("username") and tenant["username"] not in tenant_keys:
-        tenant_keys.append(tenant["username"])
-
-    # Query with string ID or ObjectId
+    tenant_keys = _get_tenant_keys(tenant)
     id_filter = [user_id]
     if ObjectId.is_valid(user_id):
         id_filter.append(ObjectId(user_id))
 
     query = {
         "_id": {"$in": id_filter},
-        "client_id": {"$in": tenant_keys} if len(tenant_keys) > 1 else client_id,
+        "client_id": {"$in": tenant_keys},
         "is_deleted": False,
     }
 
@@ -288,17 +290,14 @@ async def update_user(
     db = get_db()
     users_col = db["users"]
 
-    tenant_keys = [client_id]
-    if tenant.get("username") and tenant["username"] not in tenant_keys:
-        tenant_keys.append(tenant["username"])
-
+    tenant_keys = _get_tenant_keys(tenant)
     id_filter = [user_id]
     if ObjectId.is_valid(user_id):
         id_filter.append(ObjectId(user_id))
 
     query = {
         "_id": {"$in": id_filter},
-        "client_id": {"$in": tenant_keys} if len(tenant_keys) > 1 else client_id,
+        "client_id": {"$in": tenant_keys},
         "is_deleted": False,
     }
 
@@ -355,17 +354,14 @@ async def delete_user(
     db = get_db()
     users_col = db["users"]
 
-    tenant_keys = [client_id]
-    if tenant.get("username") and tenant["username"] not in tenant_keys:
-        tenant_keys.append(tenant["username"])
-
+    tenant_keys = _get_tenant_keys(tenant)
     id_filter = [user_id]
     if ObjectId.is_valid(user_id):
         id_filter.append(ObjectId(user_id))
 
     query = {
         "_id": {"$in": id_filter},
-        "client_id": {"$in": tenant_keys} if len(tenant_keys) > 1 else client_id,
+        "client_id": {"$in": tenant_keys},
         "is_deleted": False,
     }
 

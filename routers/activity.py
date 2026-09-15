@@ -21,10 +21,14 @@ def _clean_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
 )
 async def get_activity(tenant: Dict[str, Any] = Depends(get_current_tenant)):
     client_id = tenant["client_id"]
+    tenant_keys = [client_id]
+    if tenant.get("username") and tenant["username"] not in tenant_keys:
+        tenant_keys.append(tenant["username"])
+
     db = get_db()
     logs_col = db["activity_logs"]
 
-    cursor = logs_col.find({"client_id": client_id}).sort("timestamp", -1).limit(100)
+    cursor = logs_col.find({"client_id": {"$in": tenant_keys}}).sort("timestamp", -1).limit(100)
     logs = [_clean_doc(l) for l in cursor]
 
     # Calculate statistics

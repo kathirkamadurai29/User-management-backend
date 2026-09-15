@@ -84,10 +84,13 @@ app.include_router(activity_router, prefix="/api/v1")
 app.include_router(insights_router, prefix="/api/v1")
 app.include_router(admin_router, prefix="/api/v1")
 
-# Also mount at root for direct paths /auth/*, /clients/*, and /admin/*
+# Also mount at root for direct paths (/auth/*, /clients/*, /admin/*, /users/*, /activity/*, /insights/*)
 app.include_router(auth_router)
 app.include_router(clients_router)
 app.include_router(admin_router)
+app.include_router(users_router)
+app.include_router(activity_router)
+app.include_router(insights_router)
 
 # Mount frontend production build as unified single-link platform
 from fastapi.staticfiles import StaticFiles

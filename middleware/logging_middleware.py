@@ -25,7 +25,7 @@ class ActivityLoggingMiddleware(BaseHTTPMiddleware):
             token = auth_header.split(" ")[1].strip()
             try:
                 decoded = jwt.decode(token, options={"verify_signature": False})
-                client_id = decoded.get("client_id", "anonymous")
+                client_id = decoded.get("client_id") or decoded.get("username") or str(decoded.get("sub", "")) or "anonymous"
             except Exception:
                 pass
 

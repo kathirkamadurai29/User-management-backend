@@ -17,14 +17,18 @@ router = APIRouter(prefix="/insights", tags=["Activity & Usage"])
 async def get_insights(tenant: Dict[str, Any] = Depends(get_current_tenant)):
     client_id = tenant["client_id"]
     client_name = tenant.get("name", "Tenant")
+    tenant_keys = [client_id]
+    if tenant.get("username") and tenant["username"] not in tenant_keys:
+        tenant_keys.append(tenant["username"])
+
     db = get_db()
 
     # Query recent logs
-    cursor = db["activity_logs"].find({"client_id": client_id}).sort("timestamp", -1).limit(50)
+    cursor = db["activity_logs"].find({"client_id": {"$in": tenant_keys}}).sort("timestamp", -1).limit(50)
     logs = list(cursor)
 
     active_users_count = db["users"].count_documents({
-        "client_id": client_id,
+        "client_id": {"$in": tenant_keys},
         "is_deleted": False,
     })
 

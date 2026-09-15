@@ -44,8 +44,11 @@ async def get_current_tenant(authorization: Optional[str] = Header(None)) -> Dic
             }
 
         # For client: tenant identifier can be client_id, username, or sub
-        client_id = payload.get("client_id") or payload.get("username") or payload.get("sub")
-        if not client_id:
+        raw_client_id = payload.get("client_id")
+        username = payload.get("username")
+        sub = payload.get("sub")
+
+        if not raw_client_id and not username and not sub:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={
@@ -56,13 +59,41 @@ async def get_current_tenant(authorization: Optional[str] = Header(None)) -> Dic
                 },
             )
 
+        from config.supabase_client import get_client_by_identifier
+        resolved_client = None
+        for candidate in [raw_client_id, username, sub]:
+            if candidate:
+                resolved_client = await get_client_by_identifier(candidate)
+                if resolved_client:
+                    break
+
+        if resolved_client and resolved_client.get("is_active") is False:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": {
+                        "code": "ACCOUNT_DEACTIVATED",
+                        "message": "This client account has been suspended.",
+                    }
+                },
+            )
+
+        effective_client_id = (
+            resolved_client.get("client_id")
+            if (resolved_client and resolved_client.get("client_id"))
+            else (raw_client_id or username or sub)
+        )
+
+        all_keys = list({str(k) for k in [effective_client_id, raw_client_id, username, sub] if k})
+
         return {
-            "client_id": client_id,
-            "username": payload.get("username"),
-            "name": payload.get("name", payload.get("username", "Tenant")),
+            "client_id": effective_client_id,
+            "username": username or (resolved_client.get("username") if resolved_client else None),
+            "name": payload.get("name", resolved_client.get("name", "Tenant") if resolved_client else "Tenant"),
             "role": role,
             "token_type": payload.get("type", "session"),
             "sub": payload.get("sub"),
+            "all_keys": all_keys,
             "iat": payload.get("iat"),
             "exp": payload.get("exp"),
         }
