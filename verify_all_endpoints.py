@@ -175,6 +175,39 @@ def test_entire_api():
     assert u2_data["avatar_url"], "avatar_url must be populated from avatar_base64"
     print(f"   [OK] POST /users (via API JWT) created user with base64 avatar (HTTP 201)")
 
+    # Create user 3 using direct headers: X-Client-Id + X-Client-Secret
+    user3_email = f"user3_{rand_id}@alpha.com"
+    r_u3 = client.post("/users", headers={
+        "X-Client-Id": client_id_a,
+        "X-Client-Secret": client_secret_a,
+    }, json={
+        "name": "Kyle Reese Future",
+        "email": user3_email,
+        "role": "viewer",
+        "status": "active",
+    })
+    assert r_u3.status_code == 201, f"Create user 3 with direct headers failed: {r_u3.text}"
+    u3_data = r_u3.json()
+    u3_id = u3_data["_id"]
+    print(f"   [OK] POST /users (via direct X-Client-Id & X-Client-Secret) created user: {u3_data['name']} (HTTP 201)")
+
+    # List users with direct headers
+    r_list_direct = client.get("/users", headers={
+        "X-Client-Id": client_id_a,
+        "X-Client-Secret": client_secret_a,
+    })
+    assert r_list_direct.status_code == 200
+    assert any(u["_id"] == u3_id for u in r_list_direct.json()["users"])
+    print("   [OK] GET /users (via direct X-Client-Id & X-Client-Secret) listed users (HTTP 200)")
+
+    # Direct headers with invalid secret -> 401
+    r_bad_direct = client.get("/users", headers={
+        "X-Client-Id": client_id_a,
+        "X-Client-Secret": "invalid_secret_key",
+    })
+    assert r_bad_direct.status_code == 401
+    print("   [OK] GET /users rejected invalid direct X-Client-Secret (HTTP 401)")
+
     # Prevent duplicate email under same tenant
     r_dup_user = client.post("/users", headers=headers_a, json={
         "name": "Imposter",
@@ -278,10 +311,45 @@ def test_entire_api():
     # List all clients across platform
     r_adm_clients = client.get("/admin/clients", headers=headers_adm)
     assert r_adm_clients.status_code == 200
-    clients_list = r_adm_clients.json()["clients"]
+    clients_res = r_adm_clients.json()
+    clients_list = clients_res["clients"]
     assert any(c["username"] == user_a for c in clients_list)
     assert any(c["username"] == user_b for c in clients_list)
-    print(f"   [OK] GET /admin/clients listed {len(clients_list)} tenants with user counts (HTTP 200)")
+    assert "credentials_count" in clients_res, "Missing credentials_count summary in /admin/clients"
+    creds_summary = clients_res["credentials_count"]
+    assert creds_summary["clients_with_credentials"] >= 1
+    print(f"   [OK] GET /admin/clients listed {len(clients_list)} tenants (with {creds_summary['clients_with_credentials']} credentialed) (HTTP 200)")
+
+    # See all registered users across all tenants platform-wide
+    r_all_users = client.get("/admin/users", headers=headers_adm)
+    assert r_all_users.status_code == 200, f"GET /admin/users failed: {r_all_users.text}"
+    all_u_data = r_all_users.json()
+    assert all_u_data["total"] >= 2
+    assert "client_name" in all_u_data["users"][0]
+    print(f"   [OK] GET /admin/users listed all {all_u_data['total']} registered users across platform with enriched client info (HTTP 200)")
+
+    # Search in platform-wide users
+    r_search_all = client.get("/admin/users?search=Sarah", headers=headers_adm)
+    assert r_search_all.status_code == 200
+    assert len(r_search_all.json()["users"]) >= 1
+    print("   [OK] GET /admin/users?search=Sarah returned search matches (HTTP 200)")
+
+    # Platform overview and endpoints usage stats
+    r_stats = client.get("/admin/stats", headers=headers_adm)
+    assert r_stats.status_code == 200, f"GET /admin/stats failed: {r_stats.text}"
+    stats_data = r_stats.json()
+    assert "users_stats" in stats_data
+    assert "credentials_stats" in stats_data
+    assert "endpoints_usage_stats" in stats_data
+    assert "endpoints_breakdown" in stats_data["endpoints_usage_stats"]
+    assert "top_endpoints" in stats_data["endpoints_usage_stats"]
+    print(f"   [OK] GET /admin/stats returned platform overview: {stats_data['users_stats']['total_registered_users']} users, {stats_data['credentials_stats']['clients_with_credentials']} credentialed clients (HTTP 200)")
+    print(f"   [OK] GET /admin/stats endpoints usage stats recorded {stats_data['endpoints_usage_stats']['total_telemetry_requests']} requests (HTTP 200)")
+
+    # Test /admin/overview alias
+    r_overview = client.get("/admin/overview", headers=headers_adm)
+    assert r_overview.status_code == 200
+    print("   [OK] GET /admin/overview alias returned stats successfully (HTTP 200)")
 
     # Admin drill-down into Tenant A's users
     r_drill = client.get(f"/admin/clients/{user_a}/users", headers=headers_adm)
@@ -353,6 +421,8 @@ def test_entire_api():
     assert client.get("/api/v1/insights", headers=headers_a).status_code == 200
     assert client.get("/api/v1/clients/me", headers=headers_a).status_code == 200
     assert client.get("/api/v1/admin/clients", headers=headers_adm).status_code == 200
+    assert client.get("/api/v1/admin/users", headers=headers_adm).status_code == 200
+    assert client.get("/api/v1/admin/stats", headers=headers_adm).status_code == 200
     assert client.get("/api/v1/admin/activity", headers=headers_adm).status_code == 200
     print("   [OK] Verified parity: endpoints accessible via both /... and /api/v1/...")
 

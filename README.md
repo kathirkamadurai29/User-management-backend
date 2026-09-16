@@ -67,9 +67,9 @@ The platform enforces a strict separation between frontend tenant sessions and o
    - Generates unique `client_id` (`cli_...`) and `client_secret` (`sec_...`) **ONCE**.
    - Stores bcrypt hash of secret in Supabase.
    - Returns raw secret only this single time. Subsequent attempts return HTTP 409 Conflict.
-4. **External Consumer API Token Exchange (`POST /auth/token`)**:
-   - Exchanges `client_id` + `client_secret` for an **API JWT** (`type: api`).
-   - Strictly reserved for outside API consumers, never for the frontend dashboard.
+4. **External Consumer Programmatic Access**:
+   - **Method A (OAuth2 Token Exchange)**: `POST /auth/token` exchanges `client_id` + `client_secret` for an **API JWT** (`type: api`).
+   - **Method B (Direct Headers)**: Pass `X-Client-Id` and `X-Client-Secret` (or HTTP Basic Auth) directly on `/users` endpoints for instant programmatic calls without a separate token exchange step.
 
 ---
 
@@ -81,8 +81,10 @@ A completely decoupled Super Admin role with zero tenant scoping:
 - **Super Admin Login (`POST /admin/auth/login`)**:
   - Authenticates with `username` and `password`.
   - Returns an **Admin JWT** with **no `client_id` and no tenant scoping**.
-- **Tenant Isolation Bypass**:
-  - `GET /admin/clients`: List all registered clients with user counts and active statuses.
+- **Tenant Isolation Bypass & Global Governance**:
+  - `GET /admin/users`: View all registered users across all clients/tenants with search, status, and role filters.
+  - `GET /admin/clients`: List all registered clients with user counts, credential status, and platform credentials_count summary.
+  - `GET /admin/stats` (`GET /admin/overview`): Global dashboard overview with total registered users, client credentials count, and endpoints usage breakdown.
   - `GET /admin/clients/:id/users`: Drill into any client's user directory (with search and status filters).
   - `POST /admin/clients/:id/users`: Create a user under any specified client.
   - `GET /admin/clients/:id/users/:userId`: Retrieve user from any client.

@@ -1,4 +1,6 @@
 import os
+import base64
+import bcrypt
 import jwt
 from typing import Optional, Dict, Any
 from fastapi import Header, HTTPException, status
@@ -7,17 +9,86 @@ JWT_SECRET = os.getenv("JWT_SECRET", "development_jwt_secret_key_32_bytes_super_
 JWT_ALGORITHM = "HS256"
 
 
-async def get_current_tenant(authorization: Optional[str] = Header(None)) -> Dict[str, Any]:
+async def get_current_tenant(
+    authorization: Optional[str] = Header(None),
+    x_client_id: Optional[str] = Header(None, alias="X-Client-Id"),
+    x_client_secret: Optional[str] = Header(None, alias="X-Client-Secret"),
+) -> Dict[str, Any]:
     """
-    Validates Client JWT (Session JWT or API JWT) and extracts tenant scope.
+    Validates Client identity and extracts tenant scope.
+    Supports:
+    1. Authorization: Bearer <session_jwt_or_api_jwt>
+    2. Direct API Credentials via headers:
+       - X-Client-Id: <client_id>
+       - X-Client-Secret: <client_secret>
+    3. Authorization: Basic <base64(client_id:client_secret)>
     """
+    # 1. Check direct Basic Auth credentials in Authorization header
+    if authorization and authorization.startswith("Basic "):
+        try:
+            raw_b64 = authorization.split(" ", 1)[1].strip()
+            decoded = base64.b64decode(raw_b64).decode("utf-8")
+            if ":" in decoded:
+                x_client_id, x_client_secret = decoded.split(":", 1)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": {"code": "INVALID_BASIC_AUTH", "message": "Malformed Basic authentication header."}},
+            )
+
+    # 2. Check direct API credentials (X-Client-Id and X-Client-Secret)
+    if x_client_id and x_client_secret:
+        from config.supabase_client import get_client_by_client_id
+        client = await get_client_by_client_id(x_client_id.strip())
+        if not client:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": {"code": "INVALID_CREDENTIALS", "message": "External API client credentials could not be verified."}},
+            )
+        if client.get("is_active") is False:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"error": {"code": "ACCOUNT_DEACTIVATED", "message": "This client account has been suspended."}},
+            )
+        stored_hash = client.get("client_secret_hash")
+        if not stored_hash:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": {"code": "NO_API_CREDENTIALS", "message": "No API secret configured for this client."}},
+            )
+        try:
+            is_valid = bcrypt.checkpw(x_client_secret.strip().encode("utf-8"), stored_hash.encode("utf-8"))
+        except Exception:
+            is_valid = False
+
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"error": {"code": "INVALID_CREDENTIALS", "message": "External API client credentials could not be verified."}},
+            )
+
+        effective_client_id = client.get("client_id") or str(client.get("id"))
+        all_keys = list({str(k) for k in [effective_client_id, client.get("username"), str(client.get("id"))] if k})
+
+        return {
+            "client_id": effective_client_id,
+            "username": client.get("username"),
+            "name": client.get("name", client.get("username", "Tenant")),
+            "role": "client",
+            "token_type": "api_credentials",
+            "auth_method": "direct_credentials",
+            "sub": str(client.get("id")),
+            "all_keys": all_keys,
+        }
+
+    # 3. Check Bearer Token (Session JWT or API JWT)
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={
                 "error": {
                     "code": "UNAUTHORIZED",
-                    "message": "Missing or malformed Authorization header. Expected Bearer <token>",
+                    "message": "Missing authentication. Provide 'Authorization: Bearer <token>' or 'X-Client-Id' and 'X-Client-Secret' headers.",
                 }
             },
         )

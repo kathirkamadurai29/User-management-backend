@@ -1,4 +1,5 @@
 import time
+import base64
 import jwt
 from datetime import datetime, timezone
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -11,9 +12,16 @@ JWT_SECRET = "development_jwt_secret_key_32_bytes_super_secure_random"
 
 class ActivityLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
-        # Skip internal docs or favicon
+        # Skip internal docs, background telemetry polling, or favicon
         path = request.url.path
-        if path.startswith("/api-docs") or path.startswith("/openapi.json") or path == "/favicon.ico":
+        if (
+            path.startswith("/api-docs")
+            or path.startswith("/openapi.json")
+            or path == "/favicon.ico"
+            or path.endswith("/activity")
+            or path.endswith("/insights")
+            or path.endswith("/clients/me")
+        ):
             return await call_next(request)
 
         start_time = time.perf_counter()
@@ -28,6 +36,18 @@ class ActivityLoggingMiddleware(BaseHTTPMiddleware):
                 client_id = decoded.get("client_id") or decoded.get("username") or str(decoded.get("sub", "")) or "anonymous"
             except Exception:
                 pass
+        elif auth_header and auth_header.startswith("Basic "):
+            try:
+                raw = base64.b64decode(auth_header.split(" ", 1)[1].strip()).decode("utf-8")
+                if ":" in raw:
+                    client_id = raw.split(":", 1)[0].strip()
+            except Exception:
+                pass
+
+        if client_id == "anonymous":
+            direct_cli = request.headers.get("X-Client-Id")
+            if direct_cli:
+                client_id = direct_cli.strip()
 
         try:
             response = await call_next(request)

@@ -37,7 +37,20 @@ app = FastAPI(
 )
 
 # Connect to database
+# Connect to database
 connect_mongodb()
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        from seed_admin import seed_super_admin
+        admin_user = os.getenv("SUPER_ADMIN_USERNAME", "admin")
+        admin_pass = os.getenv("SUPER_ADMIN_PASSWORD", "admin123456")
+        await seed_super_admin(admin_user, admin_pass)
+        print(f"[Startup] Super admin '{admin_user}' ensured.")
+    except Exception as e:
+        print(f"[Startup Warning] Could not seed admin: {e}")
+
 
 # CORS Middleware configured for local and cloud/Vercel deployments
 raw_origins = os.getenv("CORS_ORIGIN", "*")

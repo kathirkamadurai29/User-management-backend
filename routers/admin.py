@@ -161,7 +161,90 @@ async def get_all_clients(admin: Dict[str, Any] = Depends(get_current_admin)):
         c_copy["has_api_credentials"] = bool(c.get("client_id") and c.get("client_secret_hash"))
         enriched.append(c_copy)
 
-    return {"clients": enriched, "total": len(enriched)}
+    clients_with_creds = sum(1 for c in enriched if c.get("has_api_credentials"))
+    clients_without_creds = len(enriched) - clients_with_creds
+    credentials_count = {
+        "clients_with_credentials": clients_with_creds,
+        "clients_without_credentials": clients_without_creds,
+        "total_credentials": clients_with_creds,
+    }
+
+    return {
+        "clients": enriched,
+        "total": len(enriched),
+        "credentials_count": credentials_count,
+    }
+
+
+# ==========================================
+# ALL REGISTERED USERS DIRECTORY (PLATFORM-WIDE)
+# ==========================================
+
+@router.get(
+    "/users",
+    summary="List all registered platform users across all clients/tenants with search and filters",
+)
+async def get_all_platform_users(
+    search: Optional[str] = Query(None, description="Search by name, email, or client_id"),
+    status: Optional[str] = Query(None, description="Filter by status: active, inactive, pending"),
+    role: Optional[str] = Query(None, description="Filter by role: admin, member, viewer"),
+    client_id: Optional[str] = Query(None, description="Filter by specific client ID or username"),
+    limit: int = Query(50, ge=1, le=500),
+    skip: int = Query(0, ge=0),
+    admin: Dict[str, Any] = Depends(get_current_admin),
+):
+    db = get_db()
+    users_col = db["users"]
+
+    query: Dict[str, Any] = {
+        "is_deleted": False,
+    }
+
+    if status and status != "all":
+        query["status"] = status.lower()
+
+    if role and role != "all":
+        query["role"] = role.lower()
+
+    if client_id and client_id != "all":
+        query["client_id"] = client_id.strip()
+
+    if search and search.strip():
+        term = search.strip()
+        query["$or"] = [
+            {"name": {"$regex": term, "$options": "i"}},
+            {"email": {"$regex": term, "$options": "i"}},
+            {"client_id": {"$regex": term, "$options": "i"}},
+        ]
+
+    cursor = users_col.find(query).sort("created_at", -1).skip(skip).limit(limit)
+    raw_users = [_clean_doc(doc) for doc in cursor]
+    total = users_col.count_documents(query)
+
+    # Build client lookup map to enrich user records with client display details
+    clients = await list_all_clients()
+    client_map = {}
+    for c in clients:
+        c_name = c.get("name") or c.get("username") or "Tenant"
+        c_user = c.get("username")
+        for k in [c.get("client_id"), c.get("username"), str(c.get("id"))]:
+            if k:
+                client_map[k] = {"name": c_name, "username": c_user}
+
+    enriched_users = []
+    for u in raw_users:
+        u_copy = dict(u)
+        c_info = client_map.get(u.get("client_id"), {})
+        u_copy["client_name"] = c_info.get("name") or u.get("client_id")
+        u_copy["client_username"] = c_info.get("username")
+        enriched_users.append(u_copy)
+
+    return {
+        "users": enriched_users,
+        "total": total,
+        "limit": limit,
+        "skip": skip,
+    }
 
 
 @router.patch(
@@ -518,4 +601,112 @@ async def get_platform_activity(
             "endpoints_breakdown": endpoint_counts,
         },
         "logs": logs[:limit],
+    }
+
+
+# ==========================================
+# PLATFORM OVERVIEW & ENDPOINTS USAGE STATS
+# ==========================================
+
+@router.get(
+    "/stats",
+    summary="Platform-wide statistics: registered users, clients credentials count, and endpoints usage stats",
+)
+@router.get(
+    "/overview",
+    summary="Platform overview alias for Super Admin",
+    include_in_schema=False,
+)
+async def get_platform_stats(admin: Dict[str, Any] = Depends(get_current_admin)):
+    db = get_db()
+    clients = await list_all_clients()
+
+    # Client Credentials Statistics
+    total_clients = len(clients)
+    clients_with_credentials = sum(1 for c in clients if c.get("client_id") and c.get("client_secret_hash"))
+    clients_without_credentials = total_clients - clients_with_credentials
+    active_clients = sum(1 for c in clients if c.get("is_active", True) is not False)
+    inactive_clients = total_clients - active_clients
+    adoption_rate = round((clients_with_credentials / total_clients) * 100, 1) if total_clients > 0 else 0.0
+
+    # Users Statistics
+    users_col = db["users"]
+    total_users = users_col.count_documents({"is_deleted": False})
+    active_users = users_col.count_documents({"is_deleted": False, "status": "active"})
+    pending_users = users_col.count_documents({"is_deleted": False, "status": "pending"})
+    inactive_users = users_col.count_documents({"is_deleted": False, "status": "inactive"})
+    deleted_users = users_col.count_documents({"is_deleted": True})
+
+    # Endpoints Usage Stats from activity telemetry
+    logs_col = db["activity_logs"]
+    total_logs_count = logs_col.count_documents({})
+    logs_cursor = logs_col.find({}).sort("timestamp", -1).limit(1000)
+    logs = [_clean_doc(l) for l in logs_cursor]
+
+    status_2xx = 0
+    status_4xx = 0
+    status_5xx = 0
+    endpoint_counts: Dict[str, int] = {}
+    method_counts: Dict[str, int] = {}
+    active_tenants = set()
+
+    for log in logs:
+        s = log.get("status", 200)
+        if 200 <= s < 300:
+            status_2xx += 1
+        elif 400 <= s < 500:
+            status_4xx += 1
+        elif s >= 500:
+            status_5xx += 1
+
+        method = log.get("method", "GET").upper()
+        method_counts[method] = method_counts.get(method, 0) + 1
+
+        ep = f"{method} {log.get('endpoint', '')}".strip()
+        endpoint_counts[ep] = endpoint_counts.get(ep, 0) + 1
+
+        c_id = log.get("client_id")
+        if c_id and c_id != "anonymous":
+            active_tenants.add(c_id)
+
+    total_analyzed = len(logs)
+    success_rate = round((status_2xx / total_analyzed) * 100, 1) if total_analyzed > 0 else 100.0
+
+    # Top endpoints sorted by call count
+    top_endpoints = [
+        {"endpoint": ep, "count": count, "percentage": round((count / total_analyzed) * 100, 1)}
+        for ep, count in sorted(endpoint_counts.items(), key=lambda x: x[1], reverse=True)[:10]
+    ] if total_analyzed > 0 else []
+
+    return {
+        "users_stats": {
+            "total_registered_users": total_users,
+            "active_users": active_users,
+            "pending_users": pending_users,
+            "inactive_users": inactive_users,
+            "deleted_users": deleted_users,
+        },
+        "clients_stats": {
+            "total_clients": total_clients,
+            "active_clients": active_clients,
+            "inactive_clients": inactive_clients,
+        },
+        "credentials_stats": {
+            "total_clients": total_clients,
+            "clients_with_credentials": clients_with_credentials,
+            "clients_without_credentials": clients_without_credentials,
+            "credentials_adoption_rate_percent": adoption_rate,
+        },
+        "endpoints_usage_stats": {
+            "total_telemetry_requests": total_logs_count,
+            "sampled_requests": total_analyzed,
+            "success_rate_percent": success_rate,
+            "status_2xx": status_2xx,
+            "status_4xx": status_4xx,
+            "status_5xx": status_5xx,
+            "method_breakdown": method_counts,
+            "endpoints_breakdown": endpoint_counts,
+            "top_endpoints": top_endpoints,
+            "active_tenants_count": len(active_tenants),
+        },
     }
