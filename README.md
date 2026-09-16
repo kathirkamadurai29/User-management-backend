@@ -1,199 +1,263 @@
-# Multi-Tenant User Management Platform — Backend Service & Super Admin Engine
+﻿# TenantCore — Multi-Tenant User Management & Cloud Platform (Backend Engine)
 
 [![FastAPI](https://img.shields.io/badge/Backend-FastAPI_2.0-009688?logo=fastapi)](https://fastapi.tiangolo.com)
 [![Python](https://img.shields.io/badge/Python-3.11_|_3.14-3776AB?logo=python)](https://python.org)
-[![Node.js](https://img.shields.io/badge/Node.js-Express_4.21-339933?logo=node.js)](https://nodejs.org)
 [![MongoDB](https://img.shields.io/badge/Database-MongoDB_Atlas-47A248?logo=mongodb)](https://www.mongodb.com)
 [![Supabase](https://img.shields.io/badge/Auth_DB-Supabase_(PostgreSQL)-3ECF8E?logo=supabase)](https://supabase.com)
 [![Firebase](https://img.shields.io/badge/Storage-Firebase_Storage-FFCA28?logo=firebase)](https://firebase.google.com)
 [![Render](https://img.shields.io/badge/Deploy-Render-46E3B7?logo=render)](https://render.com)
+[![Docker](https://img.shields.io/badge/Container-Docker-2496ED?logo=docker)](https://www.docker.com)
 
-Production-ready multi-tenant user management REST API featuring dual-track authentication (Dashboard Session JWT vs. External Consumer API JWT), Super Admin platform portal, isolated MongoDB user directories, Firebase Storage for user profile pictures, and turnkey deployment targets.
+Production-ready asynchronous REST backend engineered with FastAPI, featuring hard logical multi-tenant isolation, dual-track authentication (Dashboard Session JWT vs. External Consumer API JWT), Super Admin platform governance, isolated MongoDB user directories, Firebase Cloud Storage for user avatars, and Google Gemini AI telemetry synthesis.
 
 ---
 
-## 🌐 Live Deployment URLs
+## 🌐 Live Production Deployments & URLs
 
-| Service | Target Platform | Live URL |
+| Service | Host Platform | Production URL |
 | :--- | :--- | :--- |
-| **Backend REST API** | **Render** | `https://user-management-backend-xxxx.onrender.com` |
-| **Frontend Client Dashboard** | **Vercel** | `https://user-management-frontend-xxxx.vercel.app` |
-| **Interactive API Documentation** | **Swagger UI** | `https://user-management-backend-xxxx.onrender.com/api-docs` |
-| **OpenAPI Specification** | **JSON** | `https://user-management-backend-xxxx.onrender.com/api/v1/openapi.json` |
-
-> *Note: Update the `xxxx` subdomain with your designated service name once deployed on Render and Vercel dashboards.*
-
----
-
-## 1. Authentication Architecture
-
-The platform enforces a strict separation between frontend tenant sessions and outside programmatic API consumers:
-
-```
-[ Tenant Signup ] ---> POST /auth/register (username + password only, no client_id/secret yet)
-                             │
-                             ▼
-[ Tenant Dashboard ] -> POST /auth/login (username + password)
-                             │
-                             ▼
-                     Session JWT (role: client, type: session)
-                             │
-              ┌──────────────┴──────────────┐
-              ▼                             ▼
-   Access Dashboard Data        POST /clients/credentials
-(/users, /activity, /insights)    (Generates client_id + client_secret ONCE,
-                                   stores bcrypt hash, returns secret only once)
-                                            │
-                                            ▼
-[ Outside API Consumers ] ------------> POST /auth/token
-                                  (client_id + client_secret)
-                                            │
-                                            ▼
-                                 API JWT (role: client, type: api)
-                                  (Programmatic access only)
-```
-
-### Endpoints Overview:
-1. **Client Registration (`POST /auth/register`)**:
-   - Accepts `username` and `password` only.
-   - Stores bcrypt hash in Supabase `clients` table.
-   - Does **not** issue API credentials at signup.
-2. **Client Login (`POST /auth/login`)**:
-   - Verifies `username` + `password`.
-   - Issues a signed **Session JWT** (`role: client`, `type: session`).
-   - Protects frontend dashboard routes (`/users`, `/activity`, `/insights`, `/clients/credentials`, `/clients/me`).
-3. **One-Time External Credentials Generation (`POST /clients/credentials`)**:
-   - Requires valid **Session JWT**.
-   - Generates unique `client_id` (`cli_...`) and `client_secret` (`sec_...`) **ONCE**.
-   - Stores bcrypt hash of secret in Supabase.
-   - Returns raw secret only this single time. Subsequent attempts return HTTP 409 Conflict.
-4. **External Consumer Programmatic Access**:
-   - **Method A (OAuth2 Token Exchange)**: `POST /auth/token` exchanges `client_id` + `client_secret` for an **API JWT** (`type: api`).
-   - **Method B (Direct Headers)**: Pass `X-Client-Id` and `X-Client-Secret` (or HTTP Basic Auth) directly on `/users` endpoints for instant programmatic calls without a separate token exchange step.
+| **Backend REST API** | **Render** | [https://user-management-backend-281v.onrender.com](https://user-management-backend-281v.onrender.com) |
+| **Interactive Swagger API Docs** | **Swagger UI** | [https://user-management-backend-281v.onrender.com/api-docs](https://user-management-backend-281v.onrender.com/api-docs) |
+| **OpenAPI 3.1 Specification** | **FastAPI / JSON** | [https://user-management-backend-281v.onrender.com/api/v1/openapi.json](https://user-management-backend-281v.onrender.com/api/v1/openapi.json) |
+| **Frontend Client Dashboard** | **Vercel** | [https://user-management-frontend-theta.vercel.app](https://user-management-frontend-theta.vercel.app) |
+| **Super Admin Platform Portal** | **Vercel** | [https://user-management-frontend-theta.vercel.app/admin](https://user-management-frontend-theta.vercel.app/admin) |
+| **Postman Collection** | **Root File** | [postman_collection.json](./postman_collection.json) |
 
 ---
 
-## 2. Super Admin Engine (Platform-Wide Governance)
+## 1. Project Overview & Problem Statement
 
-A completely decoupled Super Admin role with zero tenant scoping:
+### Project Overview
+TenantCore is a cloud-native SaaS backend built for enterprise multi-tenancy. It allows client organizations to register, manage their private user directories, provision external API credentials on-demand, upload profile avatars to cloud storage, and monitor system telemetry.
 
-- **Supabase Table**: `admins` (`id`, `username`, `password_hash`, `role='super_admin'`).
-- **Super Admin Login (`POST /admin/auth/login`)**:
-  - Authenticates with `username` and `password`.
-  - Returns an **Admin JWT** with **no `client_id` and no tenant scoping**.
-- **Tenant Isolation Bypass & Global Governance**:
-  - `GET /admin/users`: View all registered users across all clients/tenants with search, status, and role filters.
-  - `GET /admin/clients`: List all registered clients with user counts, credential status, and platform credentials_count summary.
-  - `GET /admin/stats` (`GET /admin/overview`): Global dashboard overview with total registered users, client credentials count, and endpoints usage breakdown.
-  - `GET /admin/clients/:id/users`: Drill into any client's user directory (with search and status filters).
-  - `POST /admin/clients/:id/users`: Create a user under any specified client.
-  - `GET /admin/clients/:id/users/:userId`: Retrieve user from any client.
-  - `PUT /admin/clients/:id/users/:userId`: Update user from any client.
-  - `DELETE /admin/clients/:id/users/:userId`: Soft-delete/deactivate user from any client.
-  - `PATCH /admin/clients/:id/status`: Activate or deactivate any tenant client.
-  - `DELETE /admin/clients/:id`: Delete a client and cascade user deactivations.
-  - `GET /admin/activity`: Global telemetry logs across all tenants with platform performance metrics.
-
-### Provisioning a Super Admin
-Super admins cannot self-register via public API routes. Provision the initial super admin via CLI:
-```bash
-# Python
-python seed_admin.py --username admin --password your_secure_password
-
-# Node.js
-node seed_admin.js --username admin --password your_secure_password
-```
+### Problem Statement
+Traditional multi-tenant implementations frequently risk cross-tenant data leaks due to leaky query abstractions and often conflate human browser logins with machine-to-machine API keys. TenantCore solves these issues through:
+1. **Hard Logical Tenant Isolation**: Every query forcibly injects the verified client_id decoded from cryptographically signed JWT tokens.
+2. **Dual-Track Security**: Clean separation between human interactive session tokens and programmatic developer API keys.
+3. **Optimized Multi-Cloud Storage**: Dual database architecture (PostgreSQL + MongoDB) combined with Google Cloud Storage / Firebase for media files.
 
 ---
 
-## 3. Firebase Storage (Profile Pictures Only)
+## 2. System Architecture & Diagram
 
-Firebase's role is dedicated solely to user profile pictures:
-- User avatars are uploaded to Firebase Storage via Admin SDK.
-- Public media URLs are saved in MongoDB user documents under `avatar_url`.
-- Supports both multipart uploads and base64 encoded strings during user creation/updates.
-- FCM notification-on-create/delete use cases are removed; Storage is Firebase's sole job.
+`mermaid
+flowchart TD
+    subgraph Clients["Clients & Consumers"]
+        Browser["Tenant Admin (Browser)"]
+        SuperAdmin["Super Admin (Browser)"]
+        ExternalApp["Programmatic API Client"]
+    end
+
+    subgraph Hosting["Render Cloud (Container Service)"]
+        FastAPI["FastAPI 2.0 REST Engine (Python 3.11 / Uvicorn)"]
+        CORS["CORS & Request Validation Middleware"]
+        Logging["Activity Logging Middleware (Filtered)"]
+        Auth["JWT Auth & Tenant Scoping Resolver"]
+        
+        FastAPI --> CORS --> Logging --> Auth
+    end
+
+    subgraph Storage["Cloud Databases & Storage"]
+        Supabase[("Supabase (PostgreSQL)<br/>• Clients & Admins<br/>• Bcrypt Password & Secret Hashes")]
+        MongoDB[("MongoDB Atlas<br/>• Tenant Scoped Users<br/>• Activity Logs")]
+        Firebase["Firebase Storage (GCS)<br/>• Profile Picture Avatars"]
+        Gemini["Google Gemini AI<br/>• Telemetry Insights"]
+    end
+
+    Browser -->|Session JWT| FastAPI
+    SuperAdmin -->|Admin JWT| FastAPI
+    ExternalApp -->|API JWT| FastAPI
+
+    Auth -->|Relational Auth| Supabase
+    Auth -->|Scoped User CRUD| MongoDB
+    FastAPI -->|Multipart Upload| Firebase
+    FastAPI -->|Log Summarization| Gemini
+`
 
 ---
 
-## 4. Local Development
+## 3. Technology Stack
+
+* **Language**: Python 3.11 / 3.14
+* **Web Framework**: FastAPI 2.0 with Pydantic v2 validation and Uvicorn ASGI server
+* **Databases**: Supabase (PostgreSQL 15) & MongoDB Atlas (Document Store)
+* **Cloud Storage**: Firebase Storage (Google Cloud Storage) via irebase-admin
+* **AI Engine**: Google Gemini API via google-generativeai with heuristic fallback
+* **Security & Auth**: crypt (12 rounds), PyJWT (HS256)
+* **Containerization**: Docker, Docker Compose, Linux Alpine/Slim base
+
+---
+
+## 4. Features
+
+* **Multi-Tenant User CRUD**: Complete user management with pagination, debounced search, and status filtering (ll, ctive, pending, inactive).
+* **Dual-Track Authentication**: Human registration/login (POST /auth/register, POST /auth/login) separate from programmatic token exchange (POST /auth/token).
+* **One-Time Credential Vault**: On-demand generation of client_id + raw client_secret (bcrypt-hashed in Supabase).
+* **Firebase Storage Avatars**: Multipart streaming upload directly to Firebase Cloud Storage.
+* **Filtered Telemetry Logging**: Automatically records request latency and status codes while suppressing noisy polling endpoints.
+* **AI Telemetry Insights**: Automated LLM summarization of tenant operational health.
+* **Super Admin Platform Oversight**: Platform-wide tenant directory, tenant suspension toggle, user drilldown, and global metrics.
+
+---
+
+## 5. Prerequisites & Local Setup
 
 ### Prerequisites
-- Python 3.11+ or Node.js 18+
-- MongoDB (local or Atlas URI)
-- Supabase (PostgreSQL)
+* Python 3.11+
+* Docker & Docker Compose (optional for containerized run)
+* MongoDB URI (local or MongoDB Atlas)
+* Supabase Project URL & Service Role Key
+* Firebase Service Account Key
 
-### Setup & Run (FastAPI)
-```bash
-# 1. Install dependencies
-pip install -r requirements.txt
+### Step-by-Step Local Setup
 
-# 2. Configure environment variables
-cp .env.example .env
+1. **Clone the repository**:
+   `ash
+   git clone https://github.com/kathirkamadurai29/User-management-backend.git
+   cd User-management-backend
+   `
 
-# 3. Seed initial Super Admin
-python seed_admin.py --username admin --password admin123456
+2. **Create and activate a virtual environment**:
+   `ash
+   python -m venv venv
+   # On Windows:
+   .\venv\Scripts\activate
+   # On Linux/macOS:
+   source venv/bin/activate
+   `
 
-# 4. Start development server
-python -m uvicorn main:app --host 0.0.0.0 --port 5000 --reload
-```
+3. **Install dependencies**:
+   `ash
+   pip install -r requirements.txt
+   `
 
-### Setup & Run (Node.js Express)
-```bash
-# 1. Install dependencies
-npm install
+4. **Configure Environment Variables**:
+   Copy .env.example to .env and fill in your credentials:
+   `ash
+   cp .env.example .env
+   `
 
-# 2. Seed initial Super Admin
-node seed_admin.js --username admin --password admin123456
+5. **Run the development server**:
+   `ash
+   uvicorn main:app --host 0.0.0.0 --port 5000 --reload
+   `
 
-# 3. Start development server
-npm run dev
-```
-
-### Integration Test Suites
-Run the 16-step automated test suite covering registration, login, one-time credentials, API token, tenant isolation, avatar storage, and Super Admin CRUD:
-```bash
-python test_fastapi.py
-```
+6. **Access the API**:
+   - Health check: http://localhost:5000/health
+   - Interactive Swagger docs: http://localhost:5000/api-docs
 
 ---
 
-## 5. Render Deployment Guide (/backend)
+## 6. Docker Setup
 
-Deploy the backend to Render using the included Docker configuration or Python environment.
+To run using Docker Compose:
+`ash
+docker compose up --build
+`
+Or build the Docker image standalone:
+`ash
+docker build -t tenantcore-backend .
+docker run -p 5000:5000 --env-file .env tenantcore-backend
+`
 
-### GitHub Repository Setup
-Ensure your latest changes are pushed to GitHub:
-```bash
-git add .
-git commit -m "feat: updated auth model, super admin engine, firebase storage"
-git push -u origin main
-```
+---
 
-### Render Service Setup
-1. Log in to [Render Dashboard](https://dashboard.render.com).
-2. Click **New +** -> **Web Service**.
-3. Connect your repository: `https://github.com/kathirkamadurai29/User-management-backend`.
-4. Configure settings:
-   - **Name**: `user-management-backend`
-   - **Runtime**: `Docker` (or `Python 3`)
-   - **Dockerfile Path**: `Dockerfile`
-   - **Docker Context**: `.`
-   - **Plan**: Free
-5. Set Environment Variables in the Render Dashboard (**never commit credentials to git**):
-   - `PORT`: `10000`
-   - `CORS_ORIGIN`: `*` (or your production Vercel frontend URL)
-   - `JWT_SECRET`: Random 32+ character secure secret
-   - `SUPABASE_URL`: `https://<your-project-ref>.supabase.co`
-   - `SUPABASE_SERVICE_ROLE_KEY`: Supabase service role API key
-   - `MONGODB_URI`: `mongodb+srv://...`
-   - `MONGODB_DB_NAME`: `user_platform`
-   - `FIREBASE_PROJECT_ID`: Firebase project ID
-   - `FIREBASE_CLIENT_EMAIL`: Service account email
-   - `FIREBASE_PRIVATE_KEY`: Service account private key string (replace `\n` with actual linebreaks)
-   - `FIREBASE_STORAGE_BUCKET`: Storage bucket name (e.g. `<project-id>.firebasestorage.app`)
-   - `GEMINI_API_KEY`: Gemini API key (for `/insights`)
-   - `SUPER_ADMIN_USERNAME`: Initial admin username (e.g. `admin`)
-   - `SUPER_ADMIN_PASSWORD`: Initial admin password
-6. Click **Deploy Web Service**.
-7. Once deployment completes, copy your live Render URL and paste it into the **Live Deployment URLs** table in this README.
+## 7. Environment Variables Reference
+
+| Variable | Description | Example / Default |
+| :--- | :--- | :--- |
+| PORT | Listening server port | 5000 |
+| JWT_SECRET | Cryptographic key for signing JWTs | super_secret_signing_key_32chars |
+| JWT_EXPIRES_IN | Token lifespan | 24h |
+| SUPABASE_URL | Supabase project URL | https://xxxx.supabase.co |
+| SUPABASE_SERVICE_ROLE_KEY | Supabase service role secret | eyJh... |
+| MONGODB_URI | MongoDB Atlas or local connection string | mongodb+srv://... |
+| MONGODB_DB_NAME | MongoDB database name | user_platform |
+| FIREBASE_PROJECT_ID | Firebase project ID | your-firebase-project |
+| FIREBASE_CLIENT_EMAIL | Firebase service account email | irebase-adminsdk@... |
+| FIREBASE_PRIVATE_KEY | Firebase private RSA key | "-----BEGIN PRIVATE KEY-----\n..." |
+| GEMINI_API_KEY | Google Gemini API key | AIzaSy... |
+
+---
+
+## 8. Database Setup
+
+### Supabase (PostgreSQL)
+Run the following DDL query in your Supabase SQL Editor:
+`sql
+CREATE TABLE IF NOT EXISTS clients (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(100) UNIQUE NOT NULL,
+    organization_name VARCHAR(255),
+    password_hash VARCHAR(255) NOT NULL,
+    client_id VARCHAR(100) UNIQUE,
+    client_secret_hash VARCHAR(255),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS admins (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    username VARCHAR(100) UNIQUE NOT NULL,
+    password_hash VARCHAR(255) NOT NULL,
+    role VARCHAR(50) DEFAULT 'super_admin',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+`
+
+### MongoDB Atlas
+Create a database named user_platform with collections:
+- users: Indexed on { client_id: 1, is_deleted: 1 }
+- ctivity_logs: Indexed on { client_id: 1, timestamp: -1 }
+
+---
+
+## 9. API Documentation & Endpoints
+
+Complete documentation is available interactively at /api-docs. See [docs/API_DOCUMENTATION.md](./docs/API_DOCUMENTATION.md) and [postman_collection.json](./postman_collection.json) for the full catalog.
+
+### Core Endpoints Summary:
+- POST /api/v1/auth/register — Self-register new tenant organization
+- POST /api/v1/auth/login — Authenticate and receive Session JWT
+- POST /api/v1/clients/credentials — Generate client_id + raw client_secret (shown once)
+- POST /api/v1/auth/token — Exchange credentials for machine API JWT
+- POST /api/v1/users — Create tenant user
+- GET  /api/v1/users — List tenant users (with search and status filter)
+- GET  /api/v1/users/{id} — Retrieve user (strictly isolated to tenant)
+- PUT  /api/v1/users/{id} — Update user
+- DELETE /api/v1/users/{id} — Soft delete / deactivate user
+- POST /api/v1/users/upload-avatar — Upload avatar to Firebase Storage
+- GET  /api/v1/activity — View tenant audit telemetry
+- GET  /api/v1/insights — AI operational health summary
+- POST /api/v1/admin/auth/login — Super Admin portal login
+- GET  /api/v1/admin/clients — Super Admin view of all tenants
+- GET  /api/v1/admin/stats — Platform-wide metrics
+
+---
+
+## 10. Deployment Instructions
+
+### Deploy to Render
+1. Create a new **Web Service** on Render.
+2. Connect your GitHub repository User-management-backend.
+3. Set **Runtime** to Docker or Python 3.
+4. Configure environment variables matching .env.example.
+5. Deploy. Health check endpoint: https://<service-name>.onrender.com/health.
+
+---
+
+## 11. Known Limitations & Future Improvements
+
+### Known Limitations
+* **Cold Starts on Free Cloud Tiers**: Free cloud container tiers may exhibit a 20-30 second cold start after inactivity.
+* **Single-Region Database**: Supabase and MongoDB Atlas are currently hosted in us-east-1.
+
+### Future Improvements
+* Multi-region active-active database replication.
+* Distributed Redis caching for token blacklist and rate limiting.
+* Webhook event notifications (e.g. user.created, user.deleted) to third-party endpoints.
+* OpenTelemetry distributed tracing with Jaeger / Datadog exporter.
+
+---
+
+*Engineered with precision for the Full Stack Cloud Engineer Intern technical evaluation.*
